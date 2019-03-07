@@ -66,6 +66,81 @@ if __name__ == '__main__':
             if wait:
                 time.sleep(1)
 
+    elif args.mode == 'sendraw':
+        from bip32utils import BIP32Key
+        import pprint
+        def subkey(index):
+            qtctl_env = os.environ.copy()
+            qtctl_env["QTCTL_KEY"] = "xprv9v3URixxtyRbDyys2zmY7xxtt2NvjpsdR3DHu7djw9AckBowqBFuSDamhVpn127WDfcbsGbSwqLayFueXEPrpyPTqMNbJ6XCnS7obNyDsyn"
+            qtctl_env["QTCTL_ADDRESSVERSION"] = "0"
+            key_raw = subprocess.check_output(
+                "qtctl subkey-gen-int {}".format(index),
+                env=qtctl_env, shell=True).decode('utf8')
+            key = json.loads(key_raw)
+
+            ex_key = BIP32Key.fromExtendedKey(key['xpriv'])
+            private_key = ex_key.PrivateKey().encode('hex')
+
+            return {'pubkey': key['base58_pub'], 'index': index, "private": private_key}
+
+        keys = [subkey(i) for i in range(5)]
+        print("generated a keyring of 5 addresses")
+        pprint.pprint(keys)
+
+        # Assemble the list of inputs
+        inputs = []
+        for key in keys:
+            input_txns = BU.get_wallet_unspent_transactions(config, mongo, key['pubkey'])
+            for tx in input_txns:
+                for i, out in enumerate(tx['outputs']):
+                    if out['to'] != key['pubkey']:
+                        continue
+                    inputs.append({
+                        "hash": tx['hash'],
+                        "id": tx['id'],
+                        "index": i,
+                        "value": out['value'],
+                        "time": tx['time'],
+                        "height": tx['height'],
+                        "fee": tx['fee'],
+                        "public_key": tx['public_key'],
+                    })
+
+        spendable = sum(i['value'] for i in inputs)
+        print("collected {:,} spendable inputs totaling {:,}"
+              .format(len(inputs), spendable))
+        if spendable < float(args.value) + 0.01:
+            print("insufficient funds")
+            sys.exit()
+
+        picked = []
+        picked_sum = 0
+        for inp in inputs:
+            picked.append(inp)
+            picked_sum += inp['value']
+            if picked_sum >= float(args.value):
+                break
+
+        print("picked {:,} inputs totaling {:,} to send for tx"
+              .format(len(inputs), spendable))
+
+
+        transaction = TransactionFactory(
+            config,
+            mongo,
+            block_height=BU.get_latest_block(config, mongo)['index'],
+            fee=0.01,
+            public_key=config.public_key,
+            private_key=config.private_key,
+            outputs=[
+                {'to': args.to, 'value': float(args.value)}
+            ],
+            inputs=[
+                {"signature": "", "public_key": i['public_key'], "id": i['id']}
+                for i in picked],
+        )
+        print(transaction)
+
     elif args.mode == 'send':
         Send.run(config, mongo, args.to, float(args.value))
 
